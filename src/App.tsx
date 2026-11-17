@@ -1,18 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { PositionCheck, positionDistance, type PositionState } from './components/PositionCheck';
-import { ProfileChart } from './components/ProfileChart';
-import { RestrictionTable } from './components/RestrictionTable';
+import { ProfileChart, type ChartRange } from './components/ProfileChart';
 import { RouteMap } from './components/RouteMap';
-import { Sequence } from './components/Sequence';
-import { SetupPanel } from './components/SetupPanel';
-import { Summary } from './components/Summary';
-import { computeDescent, defaultSettings } from './lib/descent';
-import { fmtAgo, fmtAlt } from './lib/format';
+import { SettingsDrawer } from './components/SettingsDrawer';
+import { Waypoints } from './components/Waypoints';
+import { Segmented } from './components/fields';
+import { computeDescent, defaultSettings, hasRestriction } from './lib/descent';
+import { fmtDist, fmtUtc } from './lib/format';
 import { fetchFlightPlan } from './lib/simbrief';
-import type { CustomPoint, FlightPlan, Restriction, Settings } from './lib/types';
+import type { CustomPoint, DescentResult, FlightPlan, Restriction, Settings } from './lib/types';
 
-const STORE_KEY = 'descent-planner/v1';
+const STORE_KEY = 'descent-planner/v2';
+const THEME_KEY = 'descent-planner/theme';
 const DEFAULT_PILOT = '1149288';
+
+type Theme = 'light' | 'dark';
 
 interface Saved {
   pilot: string;
@@ -23,7 +25,7 @@ interface Saved {
   pos: PositionState;
 }
 
-const emptyPos: PositionState = { on: false, refId: '', dist: 80, alt: 30000, gs: null };
+const emptyPos: PositionState = { refId: '', dist: null, alt: null };
 
 function load(): Saved {
   try {
@@ -38,14 +40,91 @@ function load(): Saved {
   return { pilot: DEFAULT_PILOT, plan: null, settings: null, restrictions: {}, customs: [], pos: emptyPos };
 }
 
+function initialTheme(): Theme {
+  try {
+    const t = localStorage.getItem(THEME_KEY);
+    if (t === 'light' || t === 'dark') return t;
+  } catch {
+    /* ignore */
+  }
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+/** Planned clock time over the top of descent, read off the SimBrief times either side of it. */
+function todTime(plan: FlightPlan, result: DescentResult): string | null {
+  if (!result.tod || plan.estOff == null) return null;
+  const timed = result.nodes.filter((n) => n.planTime != null);
+  for (let i = 0; i < timed.length - 1; i++) {
+    const a = timed[i];
+    const b = timed[i + 1];
+    if (a.distToGo >= result.tod.d && b.distToGo <= result.tod.d) {
+      const f = (a.distToGo - result.tod.d) / (a.distToGo - b.distToGo || 1);
+      return fmtUtc(plan.estOff + a.planTime! + (b.planTime! - a.planTime!) * f);
+    }
+  }
+  return null;
+}
+
+function Hero({ plan, result, anyRestriction }: { plan: FlightPlan; result: DescentResult; anyRestriction: boolean }) {
+  const { tod } = result;
+  const time = todTime(plan, result);
+  const minutes = Math.round(result.descentTime / 60);
+  return (
+    <section className="hero" aria-label="Top of descent">
+      <p className="hero-label">Start your descent</p>
+      {tod ? (
+        <>
+          <p className="hero-num">
+            {tod.d.toFixed(1)}
+            <span>NM before {plan.dest.icao}</span>
+          </p>
+          <p className="hero-sub">
+            {Math.abs(tod.refOffset) < 0.3 ? `Over ${tod.refIdent}` : `${fmtDist(tod.refOffset)} NM before ${tod.refIdent}`}
+            {time ? `, planned for ${time}` : ''}. Touchdown about {minutes} minutes later.
+          </p>
+        </>
+      ) : (
+        <>
+          <p className="hero-num">Now</p>
+          <p className="hero-sub">The path is already below your cruise level.</p>
+        </>
+      )}
+      {result.warnings.length > 0 ? (
+        <ul className="notes">
+          {result.warnings.slice(0, 4).map((w, i) => (
+            <li key={i} className={w.level === 'warning' ? 'note-bad' : 'note-warn'}>
+              {w.text}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        anyRestriction && <p className="hero-ok">Every restriction is met at idle thrust.</p>
+      )}
+    </section>
+  );
+}
+
 export default function App() {
   const [state, setState] = useState<Saved>(load);
-  const [pilotDraft, setPilotDraft] = useState(state.pilot);
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
   const [hoverD, setHoverD] = useState<number | null>(null);
+  const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [tab, setTab] = useState<'profile' | 'map'>('profile');
+  const [range, setRange] = useState<ChartRange>('all');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pilotDraft, setPilotDraft] = useState(state.pilot);
   const started = useRef(false);
+
+  // a layout effect, so the map reads the new colours when its own effects run
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      /* ignore */
+    }
+  }, [theme]);
 
   useEffect(() => {
     try {
@@ -58,19 +137,17 @@ export default function App() {
   const loadPlan = useCallback(async (pilot: string, quiet = false) => {
     if (!quiet) setStatus('loading');
     setError('');
-    setNotice('');
     try {
       const plan = await fetchFlightPlan(pilot);
       setState((prev) => {
         const same = prev.plan?.id === plan.id;
-        if (same && !quiet) setNotice('This is still the latest flight plan. Your restrictions are kept.');
         return {
           pilot,
           plan,
           settings: same && prev.settings ? prev.settings : defaultSettings(plan),
           restrictions: same ? prev.restrictions : {},
           customs: same ? prev.customs : [],
-          pos: same ? prev.pos : { ...emptyPos, refId: plan.points[plan.points.length - 1].id, alt: plan.cruiseAlt, dist: Math.round((plan.sbTodDistToGo ?? 100) - 15) },
+          pos: same ? prev.pos : emptyPos,
         };
       });
       setStatus('idle');
@@ -95,15 +172,15 @@ export default function App() {
     document.title = plan ? `${plan.callsign} ${plan.origin.icao} to ${plan.dest.icao} | Descent Planner` : 'Descent Planner';
   }, [plan]);
 
-  const result = useMemo(
-    () => (plan && settings ? computeDescent(plan, settings, restrictions, customs) : null),
-    [plan, settings, restrictions, customs],
-  );
+  const result = useMemo(() => (plan && settings ? computeDescent(plan, settings, restrictions, customs) : null), [plan, settings, restrictions, customs]);
 
   const onSettings = useCallback((patch: Partial<Settings>) => setState((p) => (p.settings ? { ...p, settings: { ...p.settings, ...patch } } : p)), []);
   const onReset = useCallback(() => setState((p) => (p.plan ? { ...p, settings: defaultSettings(p.plan) } : p)), []);
   const onRestriction = useCallback((id: string, r: Restriction) => setState((p) => ({ ...p, restrictions: { ...p.restrictions, [id]: r } })), []);
-  const onAddCustom = useCallback((c: CustomPoint) => setState((p) => ({ ...p, customs: [...p.customs, c], restrictions: { ...p.restrictions, [c.id]: { altType: 'at', alt1: null, alt2: null, speed: null } } })), []);
+  const onAddCustom = useCallback(
+    (c: CustomPoint) => setState((p) => ({ ...p, customs: [...p.customs, c], restrictions: { ...p.restrictions, [c.id]: { altType: 'at', alt1: null, alt2: null, speed: null } } })),
+    [],
+  );
   const onRemoveCustom = useCallback(
     (id: string) =>
       setState((p) => {
@@ -114,137 +191,150 @@ export default function App() {
   );
   const onClear = useCallback(() => setState((p) => ({ ...p, restrictions: {}, customs: [] })), []);
   const onPos = useCallback((patch: Partial<PositionState>) => setState((p) => ({ ...p, pos: { ...p.pos, ...patch } })), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
   const ownship = useMemo(() => {
-    if (!result || !pos.on) return null;
+    if (!result || pos.alt == null) return null;
     const d = positionDistance(result, pos);
     return d == null ? null : { d, alt: pos.alt };
   }, [result, pos]);
 
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault();
-    void loadPlan(pilotDraft.trim());
-  };
-
-  const loader = (
-    <form className="loader" onSubmit={submit}>
-      <label className="labelled">
-        <span className="labelled-text">SimBrief pilot ID or username</span>
-        <span className="field" style={{ width: 150 }}>
-          <input value={pilotDraft} onChange={(e) => setPilotDraft(e.target.value)} spellCheck={false} autoComplete="off" aria-label="SimBrief pilot ID or username" />
-        </span>
-      </label>
-      <button type="submit" className="btn btn-primary" disabled={status === 'loading' || !pilotDraft.trim()}>
-        {status === 'loading' ? 'Loading' : plan ? 'Reload flight plan' : 'Load flight plan'}
-      </button>
-    </form>
-  );
+  const anyRestriction = Object.values(restrictions).some(hasRestriction);
 
   return (
     <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true">
-            <path d="M3 9h9l16 15" fill="none" stroke="var(--green)" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
-            <path d="M12 4v10" stroke="var(--magenta)" strokeWidth="2.2" strokeLinecap="round" />
-            <path d="M3 27h26" stroke="var(--cyan)" strokeWidth="1.6" strokeLinecap="round" opacity=".75" />
-          </svg>
-          <h1>Descent Planner</h1>
-        </div>
-
-        {plan && settings && (
-          <div className="flight">
-            <div className="flight-main">
-              <span className="flight-call">{plan.callsign}</span>
-              <span className="flight-route">
-                {plan.origin.icao}
-                <svg width="26" height="10" viewBox="0 0 26 10" aria-label="to">
-                  <path d="M1 5h22m-5-4 5 4-5 4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-                {plan.dest.icao}
-              </span>
-            </div>
-            <dl className="flight-meta">
-              <div>
-                <dt>Aircraft</dt>
-                <dd>
-                  {plan.aircraft.icao} {plan.aircraft.reg}
-                </dd>
-              </div>
-              <div>
-                <dt>Arrival</dt>
-                <dd>{plan.star || 'none filed'}</dd>
-              </div>
-              <div>
-                <dt>Runway</dt>
-                <dd>{plan.dest.runway || 'n/a'}</dd>
-              </div>
-              <div>
-                <dt>Cruise</dt>
-                <dd>{fmtAlt(settings.cruiseAlt, 0)}</dd>
-              </div>
-              <div>
-                <dt>Plan made</dt>
-                <dd>{plan.generatedAt ? fmtAgo(plan.generatedAt) : 'unknown'}</dd>
-              </div>
-            </dl>
-          </div>
+      <header className="top">
+        <p className="top-brand">Descent Planner</p>
+        {plan && (
+          <p className="top-flight">
+            <strong>{plan.callsign}</strong>
+            {plan.origin.icao} to {plan.dest.icao}
+            <span>
+              {[plan.aircraft.icao, plan.star, plan.dest.runway && `runway ${plan.dest.runway}`].filter(Boolean).join(', ')}
+            </span>
+          </p>
         )}
-
-        {loader}
+        <div className="top-actions">
+          {plan && (
+            <>
+              <button type="button" className="btn" disabled={status === 'loading'} onClick={() => void loadPlan(state.pilot)}>
+                {status === 'loading' ? 'Loading' : 'Reload plan'}
+              </button>
+              <button type="button" className="btn" onClick={() => setSettingsOpen(true)}>
+                Settings
+              </button>
+            </>
+          )}
+          <button type="button" className="btn btn-icon" aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
+            {theme === 'dark' ? (
+              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="8" cy="8" r="3.2" fill="currentColor" />
+                <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.4 1.4M11.55 11.55l1.4 1.4M3.05 12.95l1.4-1.4M11.55 4.45l1.4-1.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M13.5 9.8A6 6 0 0 1 6.2 2.5a6 6 0 1 0 7.3 7.3Z" fill="currentColor" />
+              </svg>
+            )}
+          </button>
+        </div>
       </header>
 
       {status === 'error' && (
-        <p className="banner banner-error" role="alert">
+        <p className="banner" role="alert">
           {error}
         </p>
       )}
-      {notice && status === 'idle' && (
-        <p className="banner" role="status">
-          {notice}
-        </p>
-      )}
 
-      {!plan && status !== 'error' && (
+      {!plan && (
         <main className="empty">
-          <p className="empty-title">{status === 'loading' ? 'Fetching your latest SimBrief flight plan' : 'Load a flight plan to plan the descent'}</p>
-          <p>The route, winds, weights and arrival come straight from your most recent SimBrief dispatch.</p>
+          <h1>{status === 'loading' ? 'Fetching your flight plan' : 'Load your SimBrief flight plan'}</h1>
+          <p>The route, winds, weight and arrival come from your latest SimBrief dispatch.</p>
+          <form
+            className="empty-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (pilotDraft.trim()) void loadPlan(pilotDraft.trim());
+            }}
+          >
+            <label className="labelled">
+              <span className="labelled-text">Pilot ID or username</span>
+              <span className="field">
+                <input value={pilotDraft} onChange={(e) => setPilotDraft(e.target.value)} spellCheck={false} autoComplete="off" />
+              </span>
+            </label>
+            <button type="submit" className="btn btn-primary" disabled={status === 'loading' || !pilotDraft.trim()}>
+              {status === 'loading' ? 'Loading' : 'Load flight plan'}
+            </button>
+          </form>
         </main>
       )}
 
       {plan && settings && result && (
         <main className="main">
-          <Summary plan={plan} settings={settings} result={result} />
-          <div className="top-grid">
-            <div className="primary">
-              <ProfileChart plan={plan} settings={settings} result={result} hoverD={hoverD} onHover={setHoverD} ownship={ownship} />
-              <RestrictionTable
-                plan={plan}
-                settings={settings}
-                result={result}
-                restrictions={restrictions}
-                hoverD={hoverD}
-                onHover={setHoverD}
-                onRestriction={onRestriction}
-                onAddCustom={onAddCustom}
-                onRemoveCustom={onRemoveCustom}
-                onClear={onClear}
+          <Hero plan={plan} result={result} anyRestriction={anyRestriction} />
+
+          <section className="card" aria-label="Descent path">
+            <header className="card-head card-head-tools">
+              <Segmented
+                label="View"
+                value={tab}
+                onChange={setTab}
+                options={[
+                  { value: 'profile', label: 'Profile' },
+                  { value: 'map', label: 'Map' },
+                ]}
               />
-            </div>
-            <div className="side">
-              <RouteMap plan={plan} settings={settings} result={result} hoverD={hoverD} ownship={ownship} />
-              <PositionCheck settings={settings} result={result} pos={pos} onChange={onPos} />
-              <Sequence plan={plan} settings={settings} result={result} onHover={setHoverD} />
-            </div>
-          </div>
-          <SetupPanel plan={plan} settings={settings} onChange={onSettings} onReset={onReset} />
-          <footer className="foot">
-            <p>
-              For flight simulation only. The path comes from an approximate performance model: idle thrust and a drag polar per aircraft type, flown backwards from the runway through your restrictions with the forecast winds. Trim it against your aircraft with the drag setting.
-            </p>
-            {plan.dest.metar && <p className="metar">{plan.dest.metar}</p>}
-          </footer>
+              {tab === 'profile' && (
+                <Segmented<ChartRange>
+                  label="Distance shown"
+                  value={range}
+                  onChange={setRange}
+                  options={[
+                    { value: 'all', label: 'Whole descent' },
+                    { value: '60', label: 'Last 60 NM' },
+                    { value: '25', label: 'Last 25 NM' },
+                  ]}
+                />
+              )}
+            </header>
+            {tab === 'profile' ? (
+              <ProfileChart plan={plan} settings={settings} result={result} range={range} hoverD={hoverD} onHover={setHoverD} ownship={ownship} />
+            ) : (
+              <RouteMap plan={plan} settings={settings} result={result} theme={theme} hoverD={hoverD} ownship={ownship} />
+            )}
+          </section>
+
+          <Waypoints
+            plan={plan}
+            settings={settings}
+            result={result}
+            restrictions={restrictions}
+            hoverD={hoverD}
+            onHover={setHoverD}
+            onRestriction={onRestriction}
+            onAddCustom={onAddCustom}
+            onRemoveCustom={onRemoveCustom}
+            onClear={onClear}
+          />
+
+          <PositionCheck settings={settings} result={result} pos={pos} onChange={onPos} />
+
+          <footer className="foot">For flight simulation only. Performance is estimated per aircraft type, so treat the path as a plan and adjust the drag figure in Settings if your aircraft comes down steeper or shallower.</footer>
         </main>
+      )}
+
+      {settingsOpen && plan && settings && (
+        <SettingsDrawer
+          plan={plan}
+          settings={settings}
+          pilot={state.pilot}
+          loading={status === 'loading'}
+          onChange={onSettings}
+          onReset={onReset}
+          onLoad={(p) => void loadPlan(p)}
+          onClose={closeSettings}
+        />
       )}
     </div>
   );

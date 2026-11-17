@@ -76,54 +76,25 @@ export function describeRestriction(r: Restriction, transLevel: number): string 
   return parts.join(', ');
 }
 
-export function describeSample(s: Sample): string {
-  if (s.sb > 1) return 'Too steep to hold speed, even with full speedbrake';
-  if (s.sb > 0.15) return `Speedbrake about ${Math.min(100, Math.round((s.sb * 100) / 5) * 5)}%`;
-  switch (s.mode) {
-    case 'cruise':
-      return 'Cruise';
-    case 'final':
-      return s.decel ? 'Final approach, slowing to approach speed' : 'Final approach';
-    case 'decel':
-      return 'Slowing down at idle on a shallow path';
-    case 'level':
-      return s.decel ? 'Level, slowing down' : 'Level segment';
-    case 'geo':
-      if (s.decel) return 'Fixed path between restrictions, slowing down';
-      return s.thrust ? 'Fixed path between restrictions, some thrust' : 'Fixed path between restrictions, near idle';
-    default:
-      return s.onMach ? 'Idle descent at constant Mach' : 'Idle descent';
-  }
+export function capitalize(text: string): string {
+  return text ? text[0].toUpperCase() + text.slice(1) : text;
 }
 
-export type PathKind = 'cruise' | 'idle' | 'geo' | 'decel' | 'final' | 'brake' | 'steep';
+/** How a stretch of the path flies: at idle, with speedbrake, or not at all. */
+export type PathKind = 'normal' | 'brake' | 'steep';
 
 export function pathKind(s: Sample): PathKind {
   if (s.sb > 1) return 'steep';
   if (s.sb > 0.15) return 'brake';
-  if (s.mode === 'final') return 'final';
-  if (s.mode === 'cruise') return 'cruise';
-  if (s.decel || s.mode === 'decel') return 'decel';
-  if (s.mode === 'geo' || s.mode === 'level') return 'geo';
-  return 'idle';
+  return 'normal';
 }
 
-export const PATH_COLORS: Record<PathKind, string> = {
-  cruise: 'var(--path-cruise)',
-  idle: 'var(--green)',
-  geo: 'var(--path-geo)',
-  decel: 'var(--path-decel)',
-  final: 'var(--path-final)',
-  brake: 'var(--amber)',
-  steep: 'var(--red)',
-};
-
-export const PATH_LABELS: Record<PathKind, string> = {
-  cruise: 'Cruise',
-  idle: 'Idle descent',
-  geo: 'Fixed path',
-  decel: 'Slowing down',
-  final: 'Final approach',
-  brake: 'Speedbrake',
-  steep: 'Too steep',
-};
+export function describeSample(s: Sample): string {
+  if (s.sb > 1) return 'Too steep to hold this speed';
+  if (s.sb > 0.15) return `Speedbrake about ${Math.min(100, Math.round((s.sb * 100) / 5) * 5)}%`;
+  if (s.mode === 'cruise') return 'Cruise';
+  if (s.mode === 'final') return 'Final approach';
+  if (s.decel || s.mode === 'decel') return 'Slowing down';
+  if (s.mode === 'level') return 'Level';
+  return s.thrust ? 'Some thrust' : 'Idle';
+}

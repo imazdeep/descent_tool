@@ -9,20 +9,19 @@ For flight simulation only.
 
 ## What it shows
 
-- **Vertical profile** with the computed path, restriction symbols, top of
-  descent, deceleration points, the glidepath intercept, the SimBrief planned
-  profile for comparison and the minimum off-route altitude along the route.
-  Speed, vertical speed and along-track wind share the same distance axis.
-- **Route map** with the path coloured the same way, plus predicted crossing
-  altitudes at each fix.
-- **Restrictions table**: at, at or above, at or below, or a window, and a
-  maximum speed, per fix. Points can be added at a distance before or after a
-  fix for clearances like "be level 20 miles before X".
-- **Sequence** of the events in the descent, in order.
-- **Position check**: enter where you are to see how far above or below the
-  path you sit and the rate needed to make the next restriction.
-- **Setup**: aircraft type, weight, speeds, approach, extra track miles and
-  winds (flight plan forecast, your own, or calm).
+- **When to start down**: the top of descent as a distance from the
+  destination and from the nearest fix, with the planned time.
+- **Profile**: the computed path with each fix, your restrictions and the top
+  of descent. Hover for altitude, speed and rate at any point. A stretch that
+  needs speedbrake is drawn in orange, one that is too steep in red.
+- **Map**: the same path over the arrival, with crossing altitudes.
+- **Waypoints**: the altitude and speed to expect at each fix. Add a
+  restriction (at, at or above, at or below, between, and a maximum speed) to
+  any fix, or add a point at a distance before or after a fix.
+- **Am I on the path?**: enter your position and altitude to see how far above
+  or below the path you are and the rate needed to recover.
+- **Settings**: aircraft, weight, speeds, approach, extra track miles and
+  winds. Light and dark themes.
 
 ## How the path is computed
 
